@@ -232,10 +232,16 @@ def main_worker(options):
     if not os.path.exists(model_path):
         os.makedirs(model_path)
         
+    # load different models in different stages
     if options['stage'] == 2 or options['stage'] == 3:
+        # stage 2 doen't train any models
+        # stage 3 train negative prompts by loading saved positive prompts (15 epochs)
         model_positive_path = '{}/{}'.format(model_path, 'md.pth')
         save_model = torch.load(model_positive_path)
         if 'prompt_learner.ctx_positive' in save_model.keys():
+            # Preparation work
+            # Use ctx_posi to update the positive context vectors, and generate negative context vectors.
+            # Then get the positive text features by CLIP text encoder into positive_text_features.
             model.get_ctx_posi(save_model['prompt_learner.ctx_positive'])
         else:
             model.get_ctx_posi(save_model['module.prompt_learner.ctx_positive'])
@@ -243,7 +249,7 @@ def main_worker(options):
         # model.update_nega_features(options)
         del save_model
     
-    if options['stage'] == 4:
+    if options['stage'] == 4:      # stage 4: load positive model and negative model, 
         model_positive_path = '{}/{}'.format(model_path, 'md.pth')
         save_model = torch.load(model_positive_path)
         model.get_ctx_posi(save_model['prompt_learner.ctx_positive'])
@@ -252,12 +258,12 @@ def main_worker(options):
         model_negative_path = '{}/{}/{}'.format(model_path, 'md.pth')
         print(model_negative_path)
         save_model = torch.load(model_negative_path)
-        model.get_ctx_nega(save_model['prompt_learner.ctx_negative'])
+        model.get_ctx_nega(save_model['prompt_learner.ctx_negative'])   # Set the negative context vectors to stored negative context vectors
         print('Stage 3 model loaded!')
         del save_model
         # model.update_nega_features(options)
     
-    if options['stage'] == 5:
+    if options['stage'] == 5:   # stage 5: load negative model only, maybe eval negative model
         model_negative_path = '{}/{}/{}'.format(model_path, 'md.pth')
         save_model = torch.load(model_negative_path)
         model.get_ctx_nega(save_model['prompt_learner.ctx_negative'])

@@ -21,6 +21,20 @@ _tokenizer = _Tokenizer()
 
 class PromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
+        '''
+        Initializes the PromptLearner with the given configuration, class names, and CLIP model.
+
+        Args:
+            cfg (dict): Configuration dictionary containing parameters like:
+                'N_CTX': Number of context words.
+                'CTX_INIT': Initial context words.
+                'CSC': Class-specific contexts.
+            classnames (list): List of class names.
+            clip_model (CLIPModel): Pre-trained CLIP model.
+
+        self.ctx: learnable
+        self.tokenized_prompts: static
+        '''
         super().__init__()
         n_cls = len(classnames)
         n_ctx = cfg['N_CTX']
@@ -32,7 +46,7 @@ class PromptLearner(nn.Module):
         assert cfg_imsize == clip_imsize, f"cfg_imsize ({cfg_imsize}) must equal to clip_imsize ({clip_imsize})"
 
         if ctx_init:
-            # use given words to initialize context vectors
+            # use given words to initialize context vectors to get prompt prefix, not class-specific
             ctx_init = ctx_init.replace("\"{}\"", "")
             ctx_init = ctx_init.replace(".", "")
             ctx_init = ctx_init.replace("_", " ")
@@ -42,11 +56,12 @@ class PromptLearner(nn.Module):
             prompt = clip.tokenize(ctx_init).cuda()
             with torch.no_grad():
                 embedding = clip_model.token_embedding(prompt).type(dtype)
-            ctx_vectors = embedding[0, 1 : 1 + n_ctx, :]
+            ctx_vectors = embedding[0, 1 : 1 + n_ctx, :]    # this is the initial context vector, n_cls = 0
             prompt_prefix = ctx_init
 
+        # Raise an error if the class token position is not recognized.
         else:
-            # random initialization
+            # random initialization to get prompt prefix
             if cfg['CSC']:
                 print("Initializing class-specific contexts")
                 ctx_vectors = torch.empty(n_cls, n_ctx, ctx_dim, dtype=dtype)
@@ -54,16 +69,18 @@ class PromptLearner(nn.Module):
                 print("Initializing a generic context")
                 ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=dtype)
             nn.init.normal_(ctx_vectors, std=0.02)
-            prompt_prefix = " ".join(["X"] * n_ctx)
+            prompt_prefix = " ".join(["X"] * n_ctx) # placeholder
 
         print(f'Initial context: "{prompt_prefix}"')
         print(f"Number of context words (tokens): {n_ctx}")
 
+        # convert the context vectors to learnable parameters
         self.ctx = nn.Parameter(ctx_vectors)  # to be optimized
 
+        # add encoded class names to the prompt prefix to get the full prompt vector
         classnames = [name.replace("_", " ") for name in classnames]
         name_lens = [len(_tokenizer.encode(name)) for name in classnames]
-        prompts = [prompt_prefix + " " + name + "." for name in classnames]
+        prompts = [prompt_prefix + " " + name + "." for name in classnames]     # class name at the end
 
         tokenized_prompts = torch.cat([clip.tokenize(p) for p in prompts]).cuda()
         with torch.no_grad():
@@ -73,7 +90,7 @@ class PromptLearner(nn.Module):
         # but they should be ignored in load_model() as we want to use
         # those computed using the current class names
         self.register_buffer("token_prefix", embedding[:, :1, :])  # SOS
-        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx :, :])  # CLS, EOS
+        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx :, :])  # CLS, EOS, with class name here
 
         self.n_cls = n_cls
         self.n_ctx = n_ctx
@@ -82,13 +99,19 @@ class PromptLearner(nn.Module):
         self.class_token_position = "end"
 
     def forward(self):
-        ctx = self.ctx
-        if ctx.dim() == 2:
+        '''
+        Returns the prompt vectors for the given class names.
+        The context vectors are learnable, the class names, prefix, and suffix are static.
+        Return shape: (n_cls, n_ctx + *, dim)
+        '''
+        ctx = self.ctx  # (n_cls, n_ctx, dim) or (n_ctx, dim)
+        if ctx.dim() == 2:      # (n_ctx, dim)
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
 
         prefix = self.token_prefix
         suffix = self.token_suffix
 
+        # If the class token position is at the end, concatenate prefix, context, and suffix.
         if self.class_token_position == "end":
             prompts = torch.cat(
                 [
@@ -99,13 +122,14 @@ class PromptLearner(nn.Module):
                 dim=1,
             )
 
+        # If the class token position is in the middle, split the context and insert the class token in between.
         elif self.class_token_position == "middle":
             half_n_ctx = self.n_ctx // 2
             prompts = []
             for i in range(self.n_cls):
                 name_len = self.name_lens[i]
                 prefix_i = prefix[i : i + 1, :, :]
-                class_i = suffix[i : i + 1, :name_len, :]
+                class_i = suffix[i : i + 1, :name_len, :]   # class token is in the suffix
                 suffix_i = suffix[i : i + 1, name_len:, :]
                 ctx_i_half1 = ctx[i : i + 1, :half_n_ctx, :]
                 ctx_i_half2 = ctx[i : i + 1, half_n_ctx:, :]
@@ -122,6 +146,7 @@ class PromptLearner(nn.Module):
                 prompts.append(prompt)
             prompts = torch.cat(prompts, dim=0)
 
+        # If the class token position is at the front, concatenate prefix, class token, context, and suffix.
         elif self.class_token_position == "front":
             prompts = []
             for i in range(self.n_cls):
@@ -148,6 +173,9 @@ class PromptLearner(nn.Module):
         return prompts
     
 class TextEncoder(nn.Module):
+    '''
+    Encodes the text prompts using the CLIP transformer.
+    '''
     def __init__(self, clip_model):
         super().__init__()
         self.transformer = clip_model.transformer
@@ -157,19 +185,47 @@ class TextEncoder(nn.Module):
         self.dtype = clip_model.dtype
 
     def forward(self, prompts, tokenized_prompts):
+        '''
+        Encodes the given text prompts using the CLIP transformer.
+        Return size: (batch_size, transformer.width)    #to be confirmed
+        
+        Args:
+            prompts (torch.Tensor): embedded text prompts, containing learnable context vectors.
+            tokenized_prompts (torch.Tensor): Tokenized text prompts. This is only used to get the end-of-token (eot) token location
+        '''
         x = prompts + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
 
-        # x.shape = [batch_size, n_ctx, transformer.width]
-        # take features from the eot embedding (eot_token is the highest number in each sequence)
+        # x.shape = [batch_size, n_ctx + *, transformer.width]
+        # take features from the eot embedding (eot_token is the highest number in each sequence) (end of token)
+        # project eot embedding to the text projection
         x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
 
         return x
     
 class OriginalCLIP(nn.Module):
+    '''
+    OriginalCLIP is a custom implementation of the CLIP (Contrastive Language-Image Pre-Training) model.
+    Attributes:
+        prompt_learner (PromptLearner): An instance of the PromptLearner class for generating prompts.
+        tokenized_prompts (torch.Tensor): Tokenized prompts generated by the PromptLearner.
+        image_encoder (nn.Module): The image encoder from the CLIP model.
+        text_encoder (TextEncoder): An instance of the TextEncoder class for encoding text.
+        logit_scale (torch.Tensor): Logit scaling factor from the CLIP model.
+        dtype (torch.dtype): Data type used by the CLIP model.
+        classnames (list): List of class names.
+        clip_model (nn.Module): The original CLIP model.
+        cfg (dict): Configuration dictionary.
+    Methods:
+        __init__(cfg, classnames, clip_model):
+            Initializes the OriginalCLIP model with the given configuration, class names, and CLIP model.
+        forward(image):
+            Performs a forward pass through the model, encoding the image and text, normalizing the features,
+            and computing the logits.    
+    '''
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
         self.prompt_learner = PromptLearner(cfg, classnames, clip_model)
@@ -183,6 +239,9 @@ class OriginalCLIP(nn.Module):
         self.clip_model = clip_model
         self.cfg = cfg
     def forward(self, image):
+        '''
+        Takes an image tensor as input and returns the logits for the given class names.
+        '''
         image_features = self.image_encoder(image.type(self.dtype))
         
         prompts = self.prompt_learner()
@@ -194,9 +253,11 @@ class OriginalCLIP(nn.Module):
         # text_features = self.clip_model.encode_text(text_inputs)
         # image_features = self.clip_model.encode_image(image)
         
+        # Normalize the image and text features.
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
+        # Compute the product of the image and text features and scale the logits of classification results.
         logit_scale = self.logit_scale.exp()
         logits = (logit_scale * image_features @ text_features.t())
         # logits = (100.0 * image_features @ text_features.T).softmax(dim=-1)
@@ -206,6 +267,12 @@ class OriginalCLIP(nn.Module):
     
     
 class NegaPromptLearner(nn.Module):
+    '''
+    Comparing to PromptLearner:
+    NegaPromptLearner has:
+        an additional ctx_negative to store negative context vectors.
+        repeat the init ctx vector to (1 + number of negative context vectors).
+    '''
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
         n_cls = len(classnames)
@@ -213,8 +280,8 @@ class NegaPromptLearner(nn.Module):
         ctx_init = cfg['CTX_INIT']
         if cfg['CSC']>0:
             ctx_init = None
-        n_nega_ctx = cfg['NEGA_CTX']
-        self.n_nega_ctx = n_nega_ctx
+        n_nega_ctx = cfg['NEGA_CTX']    # negative context
+        self.n_nega_ctx = n_nega_ctx    # number of negative context
         self.csc = cfg['CSC']
         self.cfg = cfg
         dtype = clip_model.dtype
@@ -223,6 +290,7 @@ class NegaPromptLearner(nn.Module):
         cfg_imsize = 224
         assert cfg_imsize == clip_imsize, f"cfg_imsize ({cfg_imsize}) must equal to clip_imsize ({clip_imsize})"
 
+        # ctx_vectors are now 3/4 dimensional
         if ctx_init:
             # use given words to initialize context vectors
             ctx_init = ctx_init.replace("\"{}\"", "")
@@ -239,7 +307,7 @@ class NegaPromptLearner(nn.Module):
             # print(prompt)
             # print("embedding.shape", embedding.shape)
             ctx_vectors = ctx_vectors.view(1, ctx_vectors.shape[0], ctx_vectors.shape[1]) # class_posi, ctx, vector
-            ctx_vectors = ctx_vectors.repeat(1+n_nega_ctx, 1, 1) 
+            ctx_vectors = ctx_vectors.repeat(1+n_nega_ctx, 1, 1)    # expand in first dimension (not batch)
             prompt_prefix = ctx_init
 
         else:
@@ -256,6 +324,7 @@ class NegaPromptLearner(nn.Module):
         print(f'Initial context: "{prompt_prefix}"')
         print(f"Number of context words (tokens): {n_ctx}")
 
+        # split the context vector
         if ctx_vectors.dim() == 3:
             ctx_positive = ctx_vectors[0:1, :, :]
             ctx_negative = ctx_vectors[1:, :, :]
@@ -270,7 +339,7 @@ class NegaPromptLearner(nn.Module):
         classnames = [name.replace("_", " ") for name in classnames]
         name_lens = [len(_tokenizer.encode(name)) for name in classnames]
         positive_prompts = [prompt_prefix + " " +  name   for name in classnames]
-        negative_prompts = [prompt_prefix + " " + name  for name in classnames]
+        negative_prompts = [prompt_prefix + " " + name  for name in classnames]     # same as positive prompts
             
         positive_tokenized_prompts = torch.cat([clip.tokenize(p) for p in positive_prompts]).cuda()
         # print(positive_tokenized_prompts[0])
@@ -285,6 +354,8 @@ class NegaPromptLearner(nn.Module):
             positive_embedding = clip_model.token_embedding(positive_tokenized_prompts).type(dtype)
             negative_embedding = clip_model.token_embedding(negative_tokenized_prompts).type(dtype)
         
+        # get embeddings
+        # squeeze the dimension 1
         positive_embedding = positive_embedding.view(positive_embedding.shape[0], 1, positive_embedding.shape[1], positive_embedding.shape[2])
         negative_embedding = negative_embedding.view(negative_embedding.shape[0], 1, negative_embedding.shape[1], negative_embedding.shape[2])
         negative_embedding = negative_embedding.repeat(1, n_nega_ctx, 1, 1)
@@ -315,7 +386,10 @@ class NegaPromptLearner(nn.Module):
         self.class_token_position = "end"
 
     def forward(self, modify_to_ori = None):
-        # modify_to_ori is a dic that transform the modified labels to original ones
+        '''
+        Returns the prompt vectors that contains both positive and negative prompts.
+        '''
+        # modify_to_ori is a dic that transform the modified labels to original ones. This maybe used when sample 10 classes from 1k classes.
         ctx_positive = self.ctx_positive
         # print('ctx_positive', ctx_positive.shape)
         ctx_negative = self.ctx_negative
@@ -333,15 +407,17 @@ class NegaPromptLearner(nn.Module):
                 additional_rows = additional_rows.to(ctx_negative.dtype)
                 ctx_negative = torch.cat([additional_rows, ctx_negative], dim=1)
                 ctx = torch.cat([ctx_positive, ctx_negative], dim=0)
-                ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1, -1)
+                ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1, -1)   # shape: (n_cls, 1+n_neg, n_ctx, dim)
             else:
-                ctx = torch.cat([ctx_positive, ctx_negative], dim=1)
+                ctx = torch.cat([ctx_positive, ctx_negative], dim=1)    # train them together
         prefix = self.token_prefix
         suffix = self.token_suffix
 
         if modify_to_ori is not None:
+            # modify_to_ori is a dic that transform the modified labels to original ones
+            # This maybe used when sample 10 classes from 1k classes.
             ori_labels = list(modify_to_ori.values())
-            ctx = ctx[ori_labels]
+            ctx = ctx[ori_labels]   # only keep the classes needed TODO: check if this is correct
             prefix = prefix[ori_labels]
             suffix = suffix[ori_labels]
         prompts = torch.cat(
@@ -354,7 +430,11 @@ class NegaPromptLearner(nn.Module):
         )
         
         return prompts
+    
     def foward_positive(self):
+        '''
+        Returns the prompt vectors for the positive class names.
+        '''
         ctx_positive = self.ctx_positive
         if ctx_positive.dim() == 3:
             ctx = ctx_positive.unsqueeze(0).expand(self.n_cls, -1, -1, -1)
@@ -371,7 +451,11 @@ class NegaPromptLearner(nn.Module):
             dim = 2,
         )
         return prompts
+    
     def foward_negative(self):
+        '''
+        Returns the prompt vectors for the negative class names only.
+        '''
         ctx_negative = self.ctx_negative
         if ctx_negative.dim() == 3:
             ctx = ctx_negative.unsqueeze(0).expand(self.n_cls, -1, -1, -1)
@@ -388,7 +472,11 @@ class NegaPromptLearner(nn.Module):
             dim = 2,
         )
         return prompts
+    
     def update_ctx_positive(self, ctx_posi):
+        '''
+        Update the positive context vectors by given ctx_posi, and generate negative context vectors.
+        '''
         noise_range = 1e-5
         noise_dist = dist.Uniform(low=-noise_range, high=noise_range, )        
         if self.csc == 1:
@@ -401,8 +489,11 @@ class NegaPromptLearner(nn.Module):
         self.ctx_negative = nn.Parameter(ctx_negative, requires_grad=True)
 
     def update_ctx_negative(self, ctx_nega):
+        ''' Set the negative context vectors to ctx_nega.'''
         self.ctx_negative = nn.Parameter(ctx_nega, requires_grad=False)
+
     def freeze_ctx_positive(self):
+        '''Freeze the positive context vectors to self.ctx_positive.'''
         self.ctx_positive = nn.Parameter(self.ctx_positive, requires_grad=False)
         
     def get_ctx_positive(self):
@@ -424,6 +515,9 @@ class NegaTextEncoder(nn.Module):
         # print('attn_mask is ', self.attn_mask)
     
     def forward(self, prompts, tokenized_prompts):
+        '''
+        Encodes the given text prompts using the CLIP transformer.
+        '''
         if len(prompts.shape) == 4:
             prompts = torch.flatten(prompts, start_dim=0, end_dim=1)
         x = prompts + self.positional_embedding.type(self.dtype)
@@ -462,25 +556,41 @@ class NegaPromptCLIP(nn.Module):
         self.positive_text_features = None
         self.clip_model = clip_model
         self.cfg = cfg
+
     def forward_negative(self, image):
+        '''
+        Only learn the negative prompts
+        return shape:
+        logits: [batch_size, nclass * 1+n_nega_ctx]
+        text_features: [nclass * 1+n_nega_ctx, 512]
+        '''
         image_features = self.image_encoder(image.type(self.dtype))
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-        negative_prompts = self.prompt_learner.foward_negative()
+        negative_prompts = self.prompt_learner.foward_negative()    # use negative prompts only
         negative_tokenized_prompts = self.prompt_learner.negative_tokenized_prompts
         negative_text_features = self.text_encoder(negative_prompts, negative_tokenized_prompts) #(1000*n_nega_ctx) * 512)
-        positive_text_features = self.positive_text_features # 1000*512
+        positive_text_features = self.positive_text_features # 1000*512, fixed
         #fusion the text_features that positive, negative, positive, negative, ...
         positive_text_features = positive_text_features.view(positive_text_features.shape[0], 1, -1)
-        negative_text_features = negative_text_features.view(positive_text_features.shape[0], self.n_nega_ctx, -1)
-        text_features = torch.cat([positive_text_features, negative_text_features], dim=1)
-        text_features = text_features.view(text_features.shape[0]*text_features.shape[1], -1)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        negative_text_features = negative_text_features.view(positive_text_features.shape[0], self.n_nega_ctx, -1)  # 1000 * n_nega_ctx * 512
+
+        # here we concatenate the positive and negative text features
+        text_features = torch.cat([positive_text_features, negative_text_features], dim=1)  
+        text_features = text_features.view(text_features.shape[0]*text_features.shape[1], -1)   # 1000*(1+n_nega_ctx) * 512
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)    # shape: 1000*(1+n_nega_ctx) * 512
         logit_scale = self.logit_scale.exp()
         logits = (logit_scale * image_features @ text_features.t())
         return logits, text_features
+    
     def forward(self, image, modify_to_ori = None):
+        '''
+        If stage == 3, only learn the negative prompts, otherwise learn both positive and negative prompts
+        Return the logits and text embeddings by CLIP
+        '''
         if self.stage == 3:
-            return self.forward_negative(image)
+            return self.forward_negative(image) # only learn the negative prompts
+        
+        # otherwise, learn both positive and negative prompts
         prompts = self.prompt_learner(modify_to_ori)
         # prompt shape: [n_class, 1+n_neg, n_ctx, dim]
         tokenized_prompts = self.tokenized_prompts
@@ -509,19 +619,27 @@ class NegaPromptCLIP(nn.Module):
 
             
     def get_ctx_posi(self, ctx_posi):
+        '''Use ctx_posi to update the positive context vectors, and generate negative context vectors.
+        Then get the positive text features by CLIP text encoder into positive_text_features.
+        '''
         self.prompt_learner.update_ctx_positive(ctx_posi)
         # get positive_text_features
-        prompts = self.prompt_learner.foward_positive()
+        prompts = self.prompt_learner.foward_positive() # Returns the prompt vectors for the positive class names.
         tokenized_prompts = self.prompt_learner.positive_tokenized_prompts
-        self.positive_text_features = self.text_encoder(prompts, tokenized_prompts)
+        self.positive_text_features = self.text_encoder(prompts, tokenized_prompts) # get text embedding for positive prompts by CLIP transformer
 
     def get_ctx_nega(self, ctx_nega):
+        '''Set the negative context vectors to ctx_nega.'''
         self.prompt_learner.update_ctx_negative(ctx_nega)
     
-    def freeze_ctx_posi(self):
+    def freeze_ctx_posi(self):   # not used. There are other functions doing this
+        '''
+        Freeze the positive context vectors to self.ctx_positive.
+        '''
         self.prompt_learner.freeze_ctx_positive()
 
-    def radius(self):
+    def radius(self):# not used, maybe in loss calculation
+        ''' calculate the cos distance between positive and negative text features, and return the radius'''
         prompts = self.prompt_learner() 
         tokenized_prompts = self.tokenized_prompts
         text_features = self.text_encoder(prompts, tokenized_prompts)
@@ -545,6 +663,7 @@ class NegaPromptCLIP(nn.Module):
         
         
         return radius
+    
     def draw_tsne_plot(self, testloader, outloader, log_dir, expr_name, epoch):
         prompts = self.prompt_learner()
         tokenized_prompts = self.tokenized_prompts

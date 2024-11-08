@@ -103,6 +103,9 @@ def load_networks(networks, result_dir, name='', loss='', criterion=None):
     return networks, criterion
 
 def get_class_prototypes(model, trainloader, nclass):
+    '''
+    Get the prototype of each class by averaging the image embeddings by CLIP encoder.
+    '''
     all_prototype = {}
     feature_num = {}
     for batch_idx, (data, labels) in enumerate(trainloader):
@@ -189,4 +192,17 @@ def label_transform(input_list, K, N):
         ori_to_modify[num] = map_counter
         modify_to_ori[map_counter] = num
         map_counter += 1
-    return ori_to_modify, modify_to_ori  
+    return ori_to_modify, modify_to_ori
+
+# # Example usage
+# input_list = [1, 3, 5]
+# K = 5
+# N = 10
+# ori_to_modify, modify_to_ori = label_transform(input_list, K, N)
+# print("Original to Modified:", ori_to_modify)
+# print("Modified to Original:", modify_to_ori)
+'''
+Original to Modified: {0: 0, 1: 1, 3: 2, 5: 3, 9: 4}
+Modified to Original: {0: 0, 1: 1, 2: 3, 3: 5, 4: 9}
+This maybe used when sample 10 classes from 1k classes.
+'''
