@@ -41,9 +41,10 @@ def get_curve_online(known, novel, stypes = ['Bas']):
     return tp, fp, tnr_at_tpr95
 
 def metric_ood(x1, x2, stypes = ['Bas'], verbose=True):
+    # shape of x1, x2: (batch_size, 1) ?
     tp, fp, tnr_at_tpr95 = get_curve_online(x1, x2, stypes)
     results = dict()
-    mtypes = ['TNR', 'AUROC', 'DTACC', 'AUIN', 'AUOUT']
+    mtypes = ['TNR', 'AUROC', 'DTACC', 'AUIN', 'AUOUT'] # metric type
     if verbose:
         print('      ', end='')
         for mtype in mtypes:
@@ -99,6 +100,7 @@ def metric_ood(x1, x2, stypes = ['Bas'], verbose=True):
     return results
 
 def compute_oscr(pred_k, pred_u, labels):
+    '''Open Set Classification Rate (OSCR) is a metric for open set recognition.'''
     x1, x2 = np.max(pred_k, axis=1), np.max(pred_u, axis=1)
     pred = np.argmax(pred_k, axis=1)
     correct = (pred == labels)

@@ -13,14 +13,16 @@ from transformers import CLIPModel
 import time
 
 def test_clip(net, criterion, testloader, outloader, epoch=None, **options):
-
+    '''
+    Compute the accuracy of classification and the AUROC of OOD detection
+    '''
     
     
     correct, total = 0, 0
 
     torch.cuda.empty_cache()
 
-    _pred_k, _pred_u, _labels = [], [], []
+    _pred_k, _pred_u, _labels = [], [], []  # prediction of known classes, unknown classes, and labels
     known_number = {}
     correct_number = {}
     all_results = {}
@@ -32,9 +34,11 @@ def test_clip(net, criterion, testloader, outloader, epoch=None, **options):
             
             with torch.set_grad_enabled(False):
                 logits,_ = net(data)
+                # classification accuracy
                 predictions = logits.data.max(1)[1]
                 total += labels.size(0)
                 correct += (predictions == labels.data).sum()
+                # for class acc?
                 for i in range(len(labels.data)):
                     if labels.data[i].item() not in known_number.keys():
                         known_number[labels.data[i].item()] = 0
@@ -66,6 +70,7 @@ def test_clip(net, criterion, testloader, outloader, epoch=None, **options):
     # for key in all_results.keys():
     #     print('class ', key)
     #     print(all_results[key])
+
     # Accuracy
     acc = float(correct) * 100. / float(total)
     print('Acc: {:.5f}'.format(acc))
@@ -78,7 +83,7 @@ def test_clip(net, criterion, testloader, outloader, epoch=None, **options):
     x1, x2 = np.max(_pred_k, axis=1), np.max(_pred_u, axis=1)
     results = evaluation.metric_ood(x1, x2)['Bas']
     
-    # OSCR
+    # OSCR (Open Set Classification Rate)
     _oscr_socre = evaluation.compute_oscr(_pred_k, _pred_u, _labels)
 
     results['ACC'] = acc
@@ -92,6 +97,7 @@ def test_nega_clip(net, criterion, testloader, outloader, epoch=None, **options)
     logits_posi_id, logits_nega_id, logits_posi_ood, logits_nega_ood = [], [], [], []
     net.eval()
     with torch.no_grad():
+        # load trained text features (pos and neg?)
         if torch.cuda.device_count() > 1:
             prompts = net.module.prompt_learner()
             tokenized_prompts = net.module.tokenized_prompts
@@ -104,18 +110,24 @@ def test_nega_clip(net, criterion, testloader, outloader, epoch=None, **options)
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
         torch.cuda.empty_cache()
         # breakpoint()
+
+        # load test ID data
         tqdm_object = tqdm(testloader, total=len(testloader))
+        # batch test
         for batch_idx, (data, labels) in enumerate(tqdm_object):
             if options['use_gpu']:
                 data, labels = data.cuda(), labels.cuda()
+            # get prediction logits
             if torch.cuda.device_count() > 1:
                 logits, _ = net.module.forward_test(data, text_features)
                 logits /= net.module.logit_scale.exp()
             else:
                 logits, _ = net.forward_test(data, text_features)
                 logits /= net.logit_scale.exp()
+            # get metrics
             predictions, ood_score, logits_posi, logits_negas = get_ood_score(logits, options)
-            _pred_k.append(ood_score)
+            # here the ood_score is in the shape of logits
+            _pred_k.append(ood_score)   # known class
             correct += (predictions == labels.data).sum()
             total += labels.size(0)
             _labels.append(labels.data.cpu().numpy())
@@ -124,6 +136,8 @@ def test_nega_clip(net, criterion, testloader, outloader, epoch=None, **options)
         acc = float(correct) * 100. / float(total)
         print('Acc: {:.5f}'.format(acc))
         tqdm_object = tqdm(outloader, total=len(outloader))
+
+        # load test OOD data
         for batch_idx, (data, labels) in enumerate(tqdm_object):
             if options['use_gpu']:
                 data, labels = data.cuda(), labels.cuda()
@@ -136,7 +150,7 @@ def test_nega_clip(net, criterion, testloader, outloader, epoch=None, **options)
                     logits, _ = net.forward_test(data, text_features)
                     logits /= net.logit_scale.exp()
                 predictions, ood_score, logits_posi, logits_negas = get_ood_score(logits, options)
-                _pred_u.append(ood_score)
+                _pred_u.append(ood_score)   # unknown class
                 logits_posi_ood.append(logits_posi.data.cpu().numpy())
                 logits_nega_ood.append(logits_negas.data.cpu().numpy())
                 
@@ -148,7 +162,7 @@ def test_nega_clip(net, criterion, testloader, outloader, epoch=None, **options)
     _labels = np.concatenate(_labels, 0)
     
     # Out-of-Distribution detction evaluation
-    x1, x2 = np.max(_pred_k, axis=1), np.max(_pred_u, axis=1)
+    x1, x2 = np.max(_pred_k, axis=1), np.max(_pred_u, axis=1)   # get the max value of each row. shape: (data size,)
     results = evaluation.metric_ood(x1, x2)['Bas']
     
     # save _pred_k, -pred_u
@@ -249,35 +263,38 @@ def fpr_and_fdr_at_recall(y_true, y_score, recall_level=0.95, pos_label=None):
     return fps[cutoff] / (np.sum(np.logical_not(y_true)))   # , fps[cutoff]/(fps[cutoff] + tps[cutoff])
 
 def get_ood_score(logits, options):
+    ''''''
+    # logits shape: (batch_size, n_classes * (1+n_nega_ctx))
     n_nega_ctx = options['NEGA_CTX']
     softmax_logits = F.softmax(logits, dim=1)
-    softmax_logits = softmax_logits.view(-1, int(softmax_logits.shape[1]/(1+n_nega_ctx)), 1+n_nega_ctx)
-    logits = logits.view(-1, int(logits.shape[1]/(1+n_nega_ctx)), 1+n_nega_ctx)
+    softmax_logits = softmax_logits.view(-1, int(softmax_logits.shape[1]/(1+n_nega_ctx)), 1+n_nega_ctx) # (batch_size, n_classes, 1+n_nega_ctx)
+    logits = logits.view(-1, int(logits.shape[1]/(1+n_nega_ctx)), 1+n_nega_ctx) # (batch_size, n_classes, 1+n_nega_ctx)
     
-    softmax_logits_posi = softmax_logits[:, :, 0]
+    softmax_logits_posi = softmax_logits[:, :, 0]   # (batch_size, n_classes)
     softmax_logits_negas = softmax_logits[:, :, 1:]
-    logits_posi = logits[:, :, 0]
+    logits_posi = logits[:, :, 0]   # (batch_size, n_classes)
     logits_negas = logits[:, :, 1:]
-    predictions = softmax_logits_posi.data.max(1)[1]
+    predictions = softmax_logits_posi.data.max(1)[1]    # (batch_size,)
 
-    if options['open_score'] == 'msp':
-        ood_score = softmax_logits_posi.data.cpu().numpy()
+    if options['open_score'] == 'msp':  # maximum softmax probability
+        ood_score = softmax_logits_posi.data.cpu().numpy()  # (batch_size, n_classes)
     elif options['open_score'] == 'maxlogit':
-        ood_score = logits_posi.data.cpu().numpy()
+        ood_score = logits_posi.data.cpu().numpy()  # (batch_size, n_classes)
     elif options['open_score'] == 'energy_oe':
-        energy = torch.log(torch.sum(torch.exp(logits_posi), dim=1)).unsqueeze(1).cpu().numpy()
+        # calculate energy-based OOD score
+        energy = torch.log(torch.sum(torch.exp(logits_posi), dim=1)).unsqueeze(1).cpu().numpy() # (batch_size, 1)
         ood_score = energy
     elif options['open_score'] == 'nega':
-        ood_score = softmax_logits_negas.data.max(2)[0].cpu().numpy()
-    elif options['open_score'] == 'posi_nega':
-        nega_dis = torch.Tensor(softmax_logits_posi.shape[0]).cuda()
+        ood_score = softmax_logits_negas.data.max(2)[0].cpu().numpy()   # (batch_size, n_classes)
+    elif options['open_score'] == 'posi_nega':  # 计算正样本部分的 softmax 概率减去负样本部分的最大 softmax 概率作为 OOD 分数。
+        nega_dis = torch.Tensor(softmax_logits_posi.shape[0]).cuda()    # (batch_size,)
         for i in range(softmax_logits_posi.shape[0]):
             nega_dis[i] = torch.max(softmax_logits_negas[i, predictions[i], :])
         nega_dis = nega_dis.view(-1, 1)
         nega_dis = nega_dis.repeat(1, softmax_logits_posi.shape[1])
         posi_minus_nega = softmax_logits_posi - nega_dis
         ood_score = posi_minus_nega.data.cpu().numpy()
-    elif options['open_score'] == 'posi_minus_closest_radius':
+    elif options['open_score'] == 'posi_minus_closest_radius':  # 计算正样本部分的 softmax 概率减去最近的半径值作为 OOD 分数。radius计算在models/models.py
         _, min_loc = torch.min(softmax_logits_negas, dim=2)
         index1 = torch.arange(min_loc.shape[1])
         index1 = index1.repeat(min_loc.shape[0]).cuda()

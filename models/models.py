@@ -606,6 +606,7 @@ class NegaPromptCLIP(nn.Module):
         return logits, text_features
     
     def forward_test(self, image, text_features=None):
+        '''The forward method for testing, need input trianed text_features'''
         image_features = self.image_encoder(image.type(self.dtype))
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         logit_scale = self.logit_scale.exp()
