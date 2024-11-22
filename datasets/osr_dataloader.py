@@ -272,13 +272,16 @@ class SVHN_OSR(object):
 
 class Tiny_ImageNet_Filter(ImageFolder):
     """Tiny_ImageNet Dataset.
+    imgs (list): List of (image path, class_index) tuples
+    targets (list): The class_index value for each image in the dataset
     """
     def __Filter__(self, known):
+
         datas, targets = self.imgs, self.targets
         new_datas, new_targets = [], []
         for i in range(len(datas)):
-            if datas[i][1] in known:
-                new_item = (datas[i][0], known.index(datas[i][1]))
+            if datas[i][1] in known:    # the class index
+                new_item = (datas[i][0], known.index(datas[i][1]))  # (image path, new class index)
                 new_datas.append(new_item)
                 # new_targets.append(targets[i])
                 new_targets.append(known.index(targets[i]))

@@ -101,7 +101,7 @@ parser.add_argument('--negative_weight', type=float, default=1)
 parser.add_argument('--random_negative', type=float, default=1e-2) 
 parser.add_argument('--nega_nega_weight', type=float, default=0.00001) 
 parser.add_argument('--open_score', type=str, default='msp')  #msp posi_nega posi_radius
-parser.add_argument('--open_set_method', type=str, default='MSP') # MSP OE Wasserstein Fence
+parser.add_argument('--open_set_method', type=str, default='MSP') # MSP OE Fence
 parser.add_argument('--positive_prompt', type=str, default='Positive')  # X X X X Positive Cats
 parser.add_argument('--negative_prompt', type=str, default='Negative')  # X X X X Negative Cats
 
@@ -311,6 +311,8 @@ def main_worker(options):
         run.log(results, step = 0)
         run.finish()
         return results
+    
+    # epoch training
     for epoch in range(options['max_epoch']):
         last_loss = 9999999999
         print("==> Epoch {}/{}".format(epoch+1, options['max_epoch']))

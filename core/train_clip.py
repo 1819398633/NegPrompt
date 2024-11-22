@@ -94,10 +94,13 @@ def train_nega_clip(net, optimizer, scheduler, trainloader, run, epoch=None,  pr
     '''
     losses = AverageMeter()
     loss_all = 0
-    n_nega_ctx = options['NEGA_CTX']
+    n_nega_ctx = options['NEGA_CTX']    # TODO
 
     # train for one epoch
-    for batch_idx, (data, labels) in enumerate(trainloader):
+    for batch_idx, (data, labels) in enumerate(trainloader):    # single item: (sample, target) where target is class_index of the target class.
+        # data shape = [batch_size, 3, 224, 224]
+        # labels shape = [batch_size,]
+
         if options['use_gpu']:
             data, labels = data.cuda(), labels.cuda()
         
@@ -152,7 +155,7 @@ def train_nega_clip(net, optimizer, scheduler, trainloader, run, epoch=None,  pr
                     loss_nega_to_nega += -torch.mean(1-dot_product)
                 loss_nega_to_nega /= negative_text_features.shape[0]
                 
-                # calculate the NID loss
+                # calculate the NIS loss [0101101000]
                 # print(output_negas.transpose(1,2))
                 out_nega_forCE = output # [batch_size, nclass * 1+n_nega_ctx]
                 # create soft_target(1-hot) for negative samples and positive samples
@@ -161,13 +164,13 @@ def train_nega_clip(net, optimizer, scheduler, trainloader, run, epoch=None,  pr
                 # This means all classes are assigned an 1.
                 soft_target.view(soft_target.shape[0], int(output.shape[1]/(1+n_nega_ctx)), -1)[idx, labels, :] = 1 # TODO: check what is this line doing
                 # labels_nega = labels.reshape(1, -1).repeat(n_nega_ctx, 1).t().reshape(-1)
-                if options['open_set_method'] == 'MSP':
+                if options['open_set_method'] == 'MSP': # default
                     loss_fun = nn.MultiLabelSoftMarginLoss(reduction='mean')
                     loss_nega_to_other = loss_fun(out_nega_forCE, soft_target)
                     # loss_nega_to_other = F.cross_entropy(out_nega_forCE, labels_nega)
                 elif options['open_set_method'] == 'Fence':
                     loss_nega_to_other = custom_alpha_cross_entropy(out_nega_forCE, soft_target, alpha=options['fence_alpha'])
-                elif options['open_set_method'] == 'OE':
+                elif options['open_set_method'] == 'OE':    # may be reference
                     loss_nega_to_other = -(out_nega_forCE.mean(1) - torch.logsumexp(out_nega_forCE, dim=1)).mean() #OE
                 # elif options['open_set_method'] == 'Wasserstein':
                 #     labels_openset = torch.eye(output_negas.shape[1], output_negas.shape[1]).cuda()
