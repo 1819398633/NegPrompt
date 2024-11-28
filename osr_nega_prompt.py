@@ -193,10 +193,10 @@ def main_worker(options):
     test_labels = [classname.replace('_', ' ') for classname in classnames]
     # print(test_labels)
     options['classnames'] = test_labels
-    options['N_CTX'] = 16
+    options['N_CTX'] = 16 # number of context vectors
     print("CLIP backbone: {}".format(options['clip_backbone']))
     device = "cuda" if use_gpu else "cpu"
-    clip_model, _, _ = open_clip.create_model_and_transforms('ViT-B-16', pretrained='laion2b_s34b_b88k')
+    clip_model, _, _ = open_clip.create_model_and_transforms('ViT-B-16', pretrained='laion2b_s34b_b88k') # use open_clip, no open_clip in coop
     
     # clip_model, _, _ = open_clip.create_model_and_transforms('ViT-B-16', pretrained='openai')
     # clip_model, clip_preprocess = clip.load(options['clip_backbone'], device=device)
